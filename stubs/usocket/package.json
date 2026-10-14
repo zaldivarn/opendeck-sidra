@@ -1,0 +1,1 @@
+{ "name": "usocket", "version": "0.0.0-stub", "description": "Stub: dbus-next falls back to plain net sockets without this native add-on", "main": "index.js", "license": "MIT" }

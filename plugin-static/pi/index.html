@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sidra</title>
+<style>
+  /* OpenDeck's UI is always dark (Tailwind neutral palette), so match it rather than the system theme. */
+  :root { color-scheme: dark; --accent: #fa2d55; --fg: #d4d4d4; --muted: #a3a3a3; --line: #525252; --field: #404040; --field-hover: #4a4a4a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 10px 12px 16px; font: 13px/1.4 system-ui, "Cantarell", "Noto Sans", sans-serif; background: transparent; color: var(--fg); }
+  .row { display: grid; grid-template-columns: 112px 1fr; align-items: center; gap: 8px; margin: 8px 0; }
+  .row > label { color: var(--muted); }
+  select, input[type=number], input[type=text] { width: 100%; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--field); color: inherit; font: inherit; }
+  input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
+  .check { display: flex; align-items: center; gap: 8px; }
+  button { padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--field); color: inherit; font: inherit; cursor: pointer; white-space: nowrap; }
+  button:hover { border-color: var(--accent); background: var(--field-hover); }
+  .status { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; }
+  .status .line { display: flex; gap: 8px; align-items: baseline; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #8e8e93; flex: none; transform: translateY(-1px); }
+  .dot.ok { background: #30d158; } .dot.bad { background: #ff9f0a; }
+  .track { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+  code { font: 12px ui-monospace, "JetBrains Mono", monospace; padding: 1px 4px; border-radius: 4px; background: var(--field); color: var(--fg); user-select: all; word-break: break-all; }
+  section[hidden] { display: none; }
+  h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 0 4px; font-weight: 600; }
+</style>
+</head>
+<body>
+  <div class="status">
+    <div class="line"><span class="dot" id="sidraDot"></span><span id="sidraText">Checking Sidra…</span></div>
+    <div class="track" id="trackText"></div>
+  </div>
+
+  <section id="sec-playpauseart" hidden>
+    <div class="row"><label for="indicator">Paused icon</label>
+      <select id="indicator" data-setting="indicator">
+        <option value="auto">Large pause icon, centred</option>
+        <option value="badge">Small pause icon, corner</option>
+        <option value="none">No icon</option>
+      </select></div>
+    <div class="row"><label for="dimWhenPaused">Paused art</label>
+      <span class="check"><input type="checkbox" id="dimWhenPaused" data-setting="dimWhenPaused"><label for="dimWhenPaused">Dim the album art</label></span></div>
+    <p class="hint">While a song is playing the key shows just the album art.</p>
+    <h3>Gestures</h3>
+    <div class="row"><label for="holdAction">Hold</label>
+      <select id="holdAction" data-setting="holdAction">
+        <option value="none">Off</option>
+        <option value="next">Next song</option>
+        <option value="previous">Previous song</option>
+        <option value="replay">Replay song</option>
+      </select></div>
+    <div class="row" id="holdTimeRow"><label for="holdTime">Hold for</label>
+      <select id="holdTime" data-setting="holdTime">
+        <option value="short">Short (0.35 s)</option>
+        <option value="normal">Normal (0.5 s)</option>
+        <option value="long">Long (0.8 s)</option>
+      </select></div>
+    <div class="row"><label for="doubleTapAction">Double-tap</label>
+      <select id="doubleTapAction" data-setting="doubleTapAction">
+        <option value="none">Off</option>
+        <option value="next">Next song</option>
+        <option value="previous">Previous song</option>
+        <option value="replay">Replay song</option>
+      </select></div>
+    <div class="row" id="doubleTapTimeRow"><label for="doubleTapTime">Tap speed</label>
+      <select id="doubleTapTime" data-setting="doubleTapTime">
+        <option value="fast">Fast (0.25 s between taps)</option>
+        <option value="normal">Normal (0.35 s)</option>
+        <option value="relaxed">Relaxed (0.5 s)</option>
+      </select></div>
+    <p class="hint" id="gestureHint"></p>
+    <h3>When Sidra is closed</h3>
+    <div class="row"><label for="launchWhenClosed">Pressing</label>
+      <span class="check"><input type="checkbox" id="launchWhenClosed" data-setting="launchWhenClosed"><label for="launchWhenClosed">Opens Sidra</label></span></div>
+    <div class="row" id="launchCommandRow"><label for="launchCommand">Command</label>
+      <input type="text" id="launchCommand" data-setting="launchCommand" placeholder="Automatic" spellcheck="false" autocomplete="off"></div>
+    <p class="hint" id="launchTarget"></p>
+    <p class="hint">Automatic starts Sidra from its app-launcher entry, so flags you added there (like the Add to Library port) are kept. Only fill in a command if Sidra isn't found.</p>
+  </section>
+
+  <section id="sec-nowplaying" hidden>
+    <div class="row"><label for="fields">Show</label>
+      <select id="fields" data-setting="fields">
+        <option value="title-artist">Song + artist</option>
+        <option value="artist-title">Artist + song</option>
+        <option value="title">Song only</option>
+        <option value="title-artist-album">Song + artist + album</option>
+      </select></div>
+    <div class="row"><label for="background">Background</label>
+      <select id="background" data-setting="background">
+        <option value="art">Dimmed album art</option>
+        <option value="plain">Plain</option>
+      </select></div>
+    <div class="row"><label for="scroll">Long text</label>
+      <span class="check"><input type="checkbox" id="scroll" data-setting="scroll"><label for="scroll">Scroll instead of cutting off</label></span></div>
+    <div class="row"><label for="speed">Scroll speed</label>
+      <select id="speed" data-setting="speed">
+        <option value="slow">Slow</option>
+        <option value="normal">Normal</option>
+        <option value="fast">Fast</option>
+      </select></div>
+    <div class="row"><label for="lineChars">Characters / line</label>
+      <input type="number" id="lineChars" data-setting="lineChars" min="4" max="40" step="1"></div>
+    <div class="row"><label for="press">On press</label>
+      <select id="press" data-setting="press">
+        <option value="raise">Show the Sidra window</option>
+        <option value="playpause">Play / pause</option>
+        <option value="none">Nothing</option>
+      </select></div>
+    <p class="hint">Font and size come from OpenDeck's title settings for this key. If text runs off the edges, lower the characters per line.</p>
+  </section>
+
+  <section id="sec-library" hidden>
+    <h3>Apple Music connection</h3>
+    <div class="status" style="margin-bottom:6px">
+      <div class="line"><span class="dot" id="cdpDot"></span><span id="cdpText">Checking…</span></div>
+    </div>
+    <div class="row"><label for="cdpPort">DevTools port</label>
+      <span class="check"><input type="number" id="cdpPort" min="1" max="65535" step="1" style="flex:1"><button id="savePort" type="button">Save &amp; test</button></span></div>
+    <p class="hint">Adding to your library isn't part of MPRIS, so this key talks to Sidra's Apple Music page directly. Start Sidra with:</p>
+    <p class="hint"><code id="launchCmd">sidra --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1</code></p>
+    <p class="hint">The port only listens on this machine. The README has a desktop-file override so the Sidra launcher always uses it.</p>
+  </section>
+
+<script>
+  'use strict';
+  const DEFAULTS = {
+    'com.zaldivarn.sidra.playpauseart': { indicator: 'auto', dimWhenPaused: true, launchWhenClosed: true, launchCommand: '', holdAction: 'next', holdTime: 'normal', doubleTapAction: 'none', doubleTapTime: 'normal' },
+    'com.zaldivarn.sidra.nowplaying': { fields: 'title-artist', background: 'art', scroll: true, lineChars: 12, speed: 'normal', press: 'raise' },
+  };
+  let ws = null, ctx = null, action = null, settings = {};
+
+  const $ = (id) => document.getElementById(id);
+  const send = (obj) => ws && ws.readyState === 1 && ws.send(JSON.stringify(obj));
+  const toPlugin = (payload) => send({ event: 'sendToPlugin', action, context: ctx, payload });
+
+  function showSection() {
+    const short = (action || '').split('.').pop();
+    const sec = document.getElementById('sec-' + short);
+    if (sec) sec.hidden = false;
+  }
+
+  function fillForm() {
+    const merged = { ...(DEFAULTS[action] || {}), ...settings };
+    if (merged.indicator === 'center') merged.indicator = 'auto'; // retired option from v1.0.0
+    if (settings.holdAction === undefined && settings.holdToSkip === false) merged.holdAction = 'none'; // v1.3 on/off switch
+    document.querySelectorAll('[data-setting]').forEach((el) => {
+      const v = merged[el.dataset.setting];
+      if (el.type === 'checkbox') el.checked = Boolean(v);
+      else if (v !== undefined) el.value = String(v);
+    });
+    syncEnabled();
+  }
+
+  function save() {
+    document.querySelectorAll('section:not([hidden]) [data-setting]').forEach((el) => {
+      const k = el.dataset.setting;
+      if (el.type === 'checkbox') settings[k] = el.checked;
+      else if (el.type === 'number') settings[k] = Number(el.value);
+      else settings[k] = el.value;
+    });
+    delete settings.holdToSkip; // replaced by holdAction
+    send({ event: 'setSettings', context: ctx, payload: settings });
+  }
+
+  function showStatus(s) {
+    const ok = s.sidra === 'connected';
+    $('sidraDot').className = 'dot ' + (ok ? 'ok' : 'bad');
+    $('sidraText').textContent = ok ? `Sidra connected · ${s.playback || 'idle'}` : 'Sidra is not running';
+    $('trackText').textContent = s.track || '';
+    if (s.cdpPort) {
+      if (document.activeElement !== $('cdpPort')) $('cdpPort').value = s.cdpPort;
+      $('launchCmd').textContent = `sidra --remote-debugging-port=${s.cdpPort} --remote-debugging-address=127.0.0.1`;
+    }
+    if (s.launch) {
+      const el = $('launchTarget');
+      el.textContent = s.launch.message;
+      el.style.color = s.launch.ok ? '' : '#ff9f0a';
+    }
+    if (s.cdp) {
+      $('cdpDot').className = 'dot ' + (s.cdp.ok ? 'ok' : 'bad');
+      $('cdpText').textContent = s.cdp.message;
+    }
+  }
+
+  function syncEnabled() {
+    const pairs = [['launchWhenClosed', 'launchCommandRow', 'launchCommand'], ['holdAction', 'holdTimeRow', 'holdTime'], ['doubleTapAction', 'doubleTapTimeRow', 'doubleTapTime']];
+    for (const [control, row, field] of pairs) {
+      const el = $(control);
+      const on = el.type === 'checkbox' ? el.checked : el.value !== 'none';
+      $(row).style.opacity = on ? '' : '0.45';
+      $(field).disabled = !on;
+    }
+    const hold = $('holdAction').value !== 'none', dbl = $('doubleTapAction').value !== 'none';
+    $('gestureHint').textContent =
+      hold && dbl ? 'A single tap still plays/pauses — after you let go, once the double-tap wait has passed.'
+      : hold ? 'A single tap still plays/pauses, when you let go of the key.'
+      : dbl ? 'A single tap still plays/pauses, after a short wait for a second tap.'
+      : 'A tap plays/pauses as soon as you press the key.';
+  }
+
+  document.addEventListener('change', (e) => {
+    if (e.target.matches('[data-setting]')) save();
+    if (['launchWhenClosed', 'holdAction', 'doubleTapAction'].includes(e.target.id)) syncEnabled();
+  });
+  $('savePort').addEventListener('click', () => {
+    $('cdpText').textContent = 'Testing…';
+    toPlugin({ type: 'setCdpPort', cdpPort: Number($('cdpPort').value) });
+  });
+
+  // Called by OpenDeck (Stream Deck SDK compatible entry point).
+  window.connectElgatoStreamDeckSocket = function (port, uuid, registerEvent, info, actionInfo) {
+    ctx = uuid;
+    try {
+      const ai = JSON.parse(actionInfo);
+      action = ai.action;
+      settings = (ai.payload && ai.payload.settings) || {};
+    } catch (e) {}
+    showSection();
+    fillForm();
+    ws = new WebSocket('ws://127.0.0.1:' + port);
+    ws.onopen = () => {
+      send({ event: registerEvent, uuid });
+      toPlugin({ type: 'refresh' });
+    };
+    ws.onmessage = (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch (e) { return; }
+      if (msg.event === 'sendToPropertyInspector' && msg.payload && msg.payload.type === 'status') showStatus(msg.payload);
+      else if (msg.event === 'didReceiveSettings' && msg.payload) { settings = msg.payload.settings || {}; fillForm(); }
+    };
+  };
+</script>
+</body>
+</html>
