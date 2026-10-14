@@ -64,6 +64,11 @@ class OpenDeck extends EventEmitter {
     }
   }
 
+  /** Bytes queued on the socket but not yet sent to OpenDeck (0 when idle). */
+  get bufferedAmount() {
+    return this.ws ? this.ws.bufferedAmount : 0;
+  }
+
   /** Forget cached render state so the next set* call always goes out (used on willAppear). */
   resetContext(context) {
     this._lastImage.delete(context);

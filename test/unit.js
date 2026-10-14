@@ -264,7 +264,7 @@ t('album colour: a contrasting colour from the cover, else a light tint of its m
   const url = `file://${coverPath}`;
   const cache = new ArtCache();
   const px = (uri, x, y) => {
-    const img = raster.decodeJpeg(Buffer.from(uri.split(',')[1], 'base64'));
+    const img = decodePng(Buffer.from(uri.split(',')[1], 'base64'));
     const i = (y * img.width + x) * 4;
     return Math.round((img.data[i] + img.data[i + 1] + img.data[i + 2]) / 3);
   };
@@ -301,6 +301,33 @@ t('album colour: a contrasting colour from the cover, else a light tint of its m
   t('paused (no icon, no dim): identical to the playing key', () => {
     assert.ok(near(px(pausedNone, ...CENTRE_BAR), 128));
     assert.ok(near(px(pausedNone, ...CORNER_BAR), 128));
+  });
+
+  // Memory-saving paths: reusable PNG scratch buffers and the reused visualizer frame.
+  t('PNG encoding round-trips exactly, with scratch buffers shared across sizes', () => {
+    for (const size of [72, 144, 72, 96, 72]) {
+      const img = raster.createImage(size, size, [0, 0, 0]);
+      for (let i = 0; i < img.data.length; i += 4) img.data.set([(i * 7) & 255, (i * 13) & 255, (i * 3) & 255], i);
+      const back = decodePng(Buffer.from(raster.encodePng(img).split(',')[1], 'base64'));
+      assert.equal(back.width, size);
+      for (let i = 0; i < img.data.length; i += 4) {
+        if (back.data[i] !== img.data[i] || back.data[i + 1] !== img.data[i + 1] || back.data[i + 2] !== img.data[i + 2]) {
+          assert.fail(`pixel ${i / 4} differs at size ${size}`);
+        }
+      }
+    }
+  });
+
+  const quiet = new Array(16).fill(0), loud = new Array(16).fill(1);
+  const loudFrame = cache.vizFrame(url, loud, { size: 72, color: [255, 0, 0] });
+  const quietFrame = cache.vizFrame(url, quiet, { size: 72, color: [255, 0, 0] });
+  t('visualizer frames are drawn at the requested key size, and the reused buffer starts clean each frame', () => {
+    const a = decodePng(Buffer.from(loudFrame.split(',')[1], 'base64'));
+    const b = decodePng(Buffer.from(quietFrame.split(',')[1], 'base64'));
+    assert.equal(a.width, 72);
+    const at = (img, x, y) => img.data.subarray((y * 72 + x) * 4, (y * 72 + x) * 4 + 3);
+    assert.ok(at(a, 30, 30)[0] > 200 && at(a, 30, 30)[1] < 80, 'loud frame: tall red bar');
+    assert.deepEqual([...at(b, 30, 30)], [128, 128, 128], 'quiet frame after a loud one: no leftover bar');
   });
 
   const legacy = await cache.playPauseKey(url, false, { indicator: 'center', dimWhenPaused: true });

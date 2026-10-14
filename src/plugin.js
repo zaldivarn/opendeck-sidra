@@ -52,12 +52,22 @@ const SPEED_MS = { slow: 700, normal: 450, fast: 280 };
 const HOLD_MS = { short: 350, normal: 500, long: 800 };
 const DOUBLE_TAP_MS = { fast: 250, normal: 350, relaxed: 500 };
 const VIZ_FPS = { low: 8, medium: 12, high: 20 };
+// Key image size in pixels for each OpenDeck device type (Elgato models); others get 96.
+const KEY_PIXELS = { 0: 72, 1: 80, 2: 96, 7: 120, 9: 96, 13: 120 };
+const VIZ_BACKLOG_BYTES = 64 * 1024; // skip frames while this much is still queued for OpenDeck
+const VIZ_IDLE_RESEND_MS = 400; // with near-identical bars, send at most this often
 
 const od = new OpenDeck();
 const log = (m) => od.log(m);
 const player = new SidraPlayer({ log });
 const art = new ArtCache(log);
 const meter = new AudioMeter({ log });
+
+// Device id -> OpenDeck device type, from the launch info and deviceDidConnect events.
+const deviceTypes = new Map();
+for (const d of (od.info && od.info.devices) || []) deviceTypes.set(d.id, d.type);
+od.on('deviceDidConnect', (msg) => deviceTypes.set(msg.device, msg.deviceInfo && msg.deviceInfo.type));
+const keyPixels = (deviceId) => KEY_PIXELS[deviceTypes.get(deviceId)] || 96;
 
 let globalSettings = { cdpPort: 9222 };
 const library = new LibraryClient({ getPort: () => Number(globalSettings.cdpPort) || 9222 });
@@ -95,6 +105,7 @@ async function renderArtPlayPause(ctx, inst) {
   const md = s.metadata;
   const playing = s.status === 'Playing';
   const seq = ++inst.seq;
+  inst.vizLastQ = null; // a still image replaces the bars: the next visualizer frame must go out
   if (!s.running) return od.setImage(ctx, svg(icons.placeholderKey({ caption: closedCaption() })));
   if (!md.title && !md.artUrl) return od.setImage(ctx, svg(icons.placeholderKey()));
   const st = settingsFor(inst);
@@ -273,15 +284,29 @@ function vizTick() {
     return;
   }
   const levels = meter.levels();
+  // OpenDeck hasn't caught up with the frames already sent: drop this one rather than queue it.
+  if (od.bufferedAmount > VIZ_BACKLOG_BYTES) return;
   const md = player.state.metadata;
+  const now = Date.now();
   for (const [ctx, inst] of keys) {
     const st = settingsFor(inst);
+    const size = keyPixels(inst.device);
+    // Bar heights in whole pixels at this key size: if none moved by more than a pixel, the
+    // frame would look the same on the deck, so skip it (resending now and then).
+    const steps = Math.round(size * 0.58);
+    const q = inst.vizLastQ && inst.vizLastQ.length === levels.length ? inst.vizLastQ : new Int16Array(levels.length).fill(-99);
+    let moved = false;
+    for (let i = 0; i < levels.length; i++) if (Math.abs(Math.round(levels[i] * steps) - q[i]) > 1) moved = true;
+    if (!moved && inst.vizShowing && now - (inst.vizLastSent || 0) < VIZ_IDLE_RESEND_MS) continue;
     // Sidra swaps the CDN cover for its cached copy mid-song; keep drawing on the one we have.
     let url = md.artUrl;
     if (!art.coverNow(url) && inst.vizKey === md.key && inst.vizUrl) url = inst.vizUrl;
     const color = st.vizColorMode === 'custom' ? raster.parseHex(st.vizColor) : art.accent(url) || [235, 235, 240];
-    const frame = art.vizFrame(url, levels, { style: st.vizStyle === 'center' ? 'center' : 'bottom', color, shade: shadeFor(inst) });
+    const frame = art.vizFrame(url, levels, { style: st.vizStyle === 'center' ? 'center' : 'bottom', color, shade: shadeFor(inst), size });
     if (!frame) continue;
+    for (let i = 0; i < levels.length; i++) q[i] = Math.round(levels[i] * steps);
+    inst.vizLastQ = q;
+    inst.vizLastSent = now;
     inst.vizUrl = url;
     inst.vizKey = md.key;
     inst.vizShowing = true;
@@ -493,7 +518,7 @@ async function sendStatus(ctx, action) {
 // ---------------------------------------------------------------- wiring
 
 od.on('willAppear', (msg) => {
-  const inst = { action: msg.action, settings: (msg.payload && msg.payload.settings) || {}, seq: 0, tick: 0 };
+  const inst = { action: msg.action, device: msg.device, settings: (msg.payload && msg.payload.settings) || {}, seq: 0, tick: 0 };
   const old = instances.get(msg.context);
   if (old && old.ticker) clearInterval(old.ticker);
   if (old) cancelGesture(old);

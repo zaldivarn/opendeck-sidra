@@ -224,8 +224,11 @@ async function step(name, fn) {
     path.join(fakeBin, 'parec'),
     `#!${process.execPath}\n` +
       `require('fs').appendFileSync(${JSON.stringify(parecLog)}, JSON.stringify({ pid: process.pid, args: process.argv.slice(2) }) + '\\n');\n` +
-      `const rate = 22050; let n = 0;\n` +
-      `setInterval(() => { const b = Buffer.alloc(441 * 2); for (let i = 0; i < 441; i++, n++) { const t = n / rate; const beat = 0.55 + 0.45 * Math.abs(Math.sin(Math.PI * 2.3 * t)); b.writeInt16LE(Math.round(9000 * beat * Math.sin(2 * Math.PI * 440 * t) + 3000 * Math.abs(Math.sin(Math.PI * 3.7 * t)) * Math.sin(2 * Math.PI * 1500 * t)), i * 2); } process.stdout.write(b); }, 20);\n` +
+      `const rate = 22050; let n = 0; let seed = 3; const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;\n` +
+      // Like music: the two notes' loudness changes every 20 ms. With the steady flag file
+      // present it plays one unchanging note instead.
+      `setInterval(() => { const steady = require('fs').existsSync(${JSON.stringify(path.join(desk, 'steady'))}); const a1 = steady ? 9000 : 3000 + 9000 * rnd(), a2 = steady ? 0 : 5000 * rnd();\n` +
+      `  const b = Buffer.alloc(441 * 2); for (let i = 0; i < 441; i++, n++) { const t = n / rate; b.writeInt16LE(Math.round(a1 * Math.sin(2 * Math.PI * 440 * t) + a2 * Math.sin(2 * Math.PI * 1500 * t)), i * 2); } process.stdout.write(b); }, 20);\n` +
       `process.on('SIGTERM', () => process.exit(0));\n`,
     { mode: 0o755 },
   );
@@ -250,7 +253,7 @@ async function step(name, fn) {
 
   const logFile = OUT ? fs.createWriteStream(path.join(OUT, 'plugin.log')) : null;
   let pluginLog = '';
-  const child = spawn(process.execPath, ['bin/plugin.js', '-port', String(odPort), '-pluginUUID', NS, '-registerEvent', 'registerPlugin', '-info', '{}'], {
+  const child = spawn(process.execPath, ['bin/plugin.js', '-port', String(odPort), '-pluginUUID', NS, '-registerEvent', 'registerPlugin', '-info', JSON.stringify({ devices: [{ id: 'dev1', name: 'Stream Deck MK.2', type: 0, size: { rows: 3, columns: 5 } }] })], {
     cwd: PLUGIN,
     env: pluginEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -326,9 +329,9 @@ async function step(name, fn) {
 
   await step('keys render on appear (Sidra paused on track 1)', async () => {
     for (const name of Object.keys(C)) appear(name);
-    await waitFor(() => /^data:image\/jpeg;base64,/.test(last(k('art').images) || ''), 'album art on the Play/Pause key');
+    await waitFor(() => /^data:image\/png;base64,/.test(last(k('art').images) || ''), 'album art on the Play/Pause key');
     await waitFor(() => last(k('song').titles) === 'Sunrise\nThe Testers', 'song text');
-    await waitFor(() => /^data:image\/jpeg;base64,/.test(last(k('song').images) || ''), 'song background');
+    await waitFor(() => /^data:image\/png;base64,/.test(last(k('song').images) || ''), 'song background');
     assert.ok(!k('art').images.some((i) => svgText(i).includes('Sidra closed')), 'no "Sidra closed" placeholder while still connecting');
     assert.ok(!k('song').titles.includes('Sidra\nclosed'), 'no "Sidra closed" flash while still connecting');
     assert.equal(last(k('shuffle').states), 0);
@@ -507,7 +510,7 @@ async function step(name, fn) {
     assert.equal(report.env.APPIMAGE, null, "OpenDeck's APPIMAGE must not leak into Sidra");
     assert.ok(!report.env.PATH.includes('.mount_OpenDe'), 'AppImage mount stripped from PATH');
     await waitFor(() => last(k('song').titles) === 'Launched', 'plugin attached to the launched Sidra');
-    await waitFor(() => /^data:image\/jpeg/.test(last(k('art').images)), 'album art for the launched Sidra');
+    await waitFor(() => /^data:image\/png/.test(last(k('art').images)), 'album art for the launched Sidra');
     assert.match(pluginLog, /Opening Sidra via desktop entry/);
     save('Play/Pause art · after opening Sidra', 'art');
     process.kill(report.pid, 'SIGTERM');
@@ -538,7 +541,7 @@ async function step(name, fn) {
     syncNowPlaying(0);
     sidra = await startMockSidra({ tracks: tracks.map((t) => ({ ...t })) });
     await waitFor(() => last(k('song').titles) === 'Sunrise', 'reattached (song-only mode)');
-    await waitFor(() => /^data:image\/jpeg/.test(last(k('art').images)), 'art back');
+    await waitFor(() => /^data:image\/png/.test(last(k('art').images)), 'art back');
     press('art');
     await waitFor(() => sidra.calls.includes('PlayPause'), 'PlayPause after restart');
   });
@@ -664,15 +667,20 @@ async function step(name, fn) {
     await sleep(800);
     assert.equal(count('Next'), nx);
     appear('art');
-    await waitFor(() => /^data:image\/jpeg/.test(last(k('art').images)), 'art key back');
+    await waitFor(() => /^data:image\/png/.test(last(k('art').images)), 'art key back');
   });
 
   // ---------------------------------------------------------------- song text + visualizer
-  // Still frames are JPEG, visualizer frames PNG.
-  const jpegPixel = (uri, x, y) => {
+  // Key images are PNG (older builds used JPEG for still images).
+  const decodeKey = (uri) => {
     const bytes = Buffer.from(uri.split(',')[1], 'base64');
-    const img = uri.startsWith('data:image/png') ? require('../src/png').decodePng(bytes) : require('jpeg-js').decode(bytes, { formatAsRGBA: true });
-    const i = (y * img.width + x) * 4;
+    return uri.startsWith('data:image/png') ? require('../src/png').decodePng(bytes) : require('jpeg-js').decode(bytes, { formatAsRGBA: true });
+  };
+  // Pixel at (x, y) given on the 144 px canvas, scaled to the image's real size.
+  const jpegPixel = (uri, x, y) => {
+    const img = decodeKey(uri);
+    const k = img.width / 144;
+    const i = (Math.min(img.height - 1, Math.round(y * k)) * img.width + Math.min(img.width - 1, Math.round(x * k))) * 4;
     return [img.data[i], img.data[i + 1], img.data[i + 2]];
   };
   const titleParams = (alignment) =>
@@ -691,7 +699,7 @@ async function step(name, fn) {
     syncNowPlaying(0);
     sidra.setTrack(0);
     sidra.setStatus('Playing');
-    await waitFor(() => /^data:image\/jpeg/.test(last(k('art').images)), 'art for Sunrise');
+    await waitFor(() => /^data:image\/png/.test(last(k('art').images)), 'art for Sunrise');
     await sleep(300);
     assert.equal(k('art').titles.length, before, 'no setTitle while song text is off');
   });
@@ -730,13 +738,26 @@ async function step(name, fn) {
     await sleep(1000);
     const perSecond = k('art').images.length - n0;
     assert.ok(perSecond >= 8 && perSecond <= 14, `~12 frames a second (got ${perSecond})`);
-    // 440 Hz lands in bar 6 of 16; it should be lit, and a high bar should be at rest.
+    // Frames are drawn at the deck's key size: 72 px for this MK.2.
     const frame = last(k('art').images);
+    assert.equal(decodeKey(frame).width, 72, 'frame at the MK.2 key size');
+    // 440 Hz lands in bar 6 of 16; it should be lit, and a high bar should be at rest.
     const barX = (i) => Math.round(9 + i * ((144 - 18 - 2.2 * 15) / 16 + 2.2) + 2.9);
     const bright = (p) => p.reduce((a, b) => a + b, 0) / 3;
     assert.ok(bright(jpegPixel(frame, barX(6), 100)) > 150, 'bar 6 is up');
     assert.ok(bright(jpegPixel(frame, barX(14), 100)) < bright(jpegPixel(frame, barX(6), 100)) - 60, 'bar 14 stays low');
     save('Play/Pause art · visualizer (album colour)', 'art');
+  });
+
+  await step('visualizer: a steady sound sends far fewer frames (unchanged bars are skipped)', async () => {
+    fs.writeFileSync(path.join(desk, 'steady'), '');
+    await sleep(1500); // let the bars settle on the steady note
+    const n0 = k('art').images.length;
+    await sleep(2000);
+    const perSecond = (k('art').images.length - n0) / 2;
+    assert.ok(perSecond <= 3, `steady note → at most ~2.5 frames a second (got ${perSecond})`);
+    fs.rmSync(path.join(desk, 'steady'));
+    await sleep(500);
   });
 
   await step('visualizer: custom colour', async () => {

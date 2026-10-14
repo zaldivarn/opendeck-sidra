@@ -91,7 +91,7 @@ All keys show the Sidra connection state and current track at the top of the set
 - Covers are taken from `mpris:artUrl`. Sidra publishes Apple's CDN URL first, then switches to its local cache copy (`~/.cache/sidra/artwork`); the plugin asks the CDN for a 288px rendition and handles the cached file too (including PNG covers saved under a `.jpg` name).
 - Add to Library works for catalogue songs and music videos. Radio stations and shows aren't supported and show an alert. Songs you're playing *from* your library show the check straight away.
 - The check on the Add to Library key is also refreshed on each track change by asking Apple whether the song is already in your library. That lookup is best-effort: if it fails, the key just shows the plus until you press it.
-- The visualizer costs about 5 ms of CPU per frame in the plugin (roughly 5% of one core at 12 fps), plus OpenDeck drawing the key.
+- Visualizer frames are drawn at your deck's own key size (72 px on a Stream Deck MK.2, 96 px on an XL, 120 px on a Plus), and a frame is skipped when no bar moved by more than a pixel, so quiet or steady passages send far fewer. On an MK.2 a frame is about 7 KB and costs the plugin roughly 2 ms (about 2% of one core at 12 fps), plus OpenDeck drawing the key.
 - Plugin log: `~/.local/share/opendeck/logs/plugins/com.zaldivarn.sidra.sdPlugin.log` (Flatpak: under `~/.var/app/me.amankhanna.opendeck/`).
 
 ## Licence

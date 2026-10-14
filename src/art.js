@@ -70,6 +70,8 @@ class ArtCache {
     this.rendered = new LRU(64); // render key -> data URI
     this.ready = new LRU(24); // artUrl -> loaded 144x144 image (for per-frame drawing)
     this.accents = new LRU(24); // artUrl -> [r, g, b]
+    this.vizBases = new LRU(6); // url|size|shade -> cover at key size with the text shade applied
+    this.frames = new Map(); // size -> reusable frame image
   }
 
   /** 144x144 RGBA cover, or null when it cannot be loaded. Never rejects. */
@@ -123,15 +125,29 @@ class ArtCache {
   }
 
   /**
-   * One visualizer frame (playing): the cover, the text shade if any, then the bars.
-   * Synchronous and uncached — called every frame. Null until the cover has loaded.
+   * One visualizer frame (playing): the cover, the text shade if any, then the bars, drawn
+   * at the deck's own key size (72 px on a Stream Deck MK.2) rather than OpenDeck's 144 px
+   * canvas — a quarter of the pixels, and frames about a third of the size. The scaled,
+   * shaded cover is cached per song and the frame buffer is reused, so a frame allocates
+   * almost nothing. Null until the cover has loaded.
    */
-  vizFrame(artUrl, levels, { style = 'bottom', color = [255, 255, 255], shade = null } = {}) {
-    const base = this.coverNow(artUrl);
-    if (!base) return null;
-    const img = ArtCache.applyShade(raster.cloneImage(base), shade);
-    raster.drawBars(img, levels, { style, color });
-    return raster.encodePng(img); // ~10x faster than JPEG here, and lossless
+  vizFrame(artUrl, levels, { style = 'bottom', color = [255, 255, 255], shade = null, size = raster.KEY_SIZE } = {}) {
+    const cover = this.coverNow(artUrl);
+    if (!cover) return null;
+    const key = `${artUrl}|${size}|${shade}`;
+    let base = this.vizBases.get(key);
+    if (!base) {
+      base = ArtCache.applyShade(size === cover.width ? raster.cloneImage(cover) : raster.resizeSquare(cover, size), shade);
+      this.vizBases.set(key, base);
+    }
+    let frame = this.frames.get(size);
+    if (!frame) {
+      frame = raster.createImage(size, size);
+      this.frames.set(size, frame);
+    }
+    base.data.copy(frame.data);
+    raster.drawBars(frame, levels, { style, color });
+    return raster.encodePng(frame);
   }
 
   /**
@@ -155,7 +171,7 @@ class ArtCache {
       if (indicator === 'badge') raster.drawBadge(img, 'pause', S - 26, S - 26, 19, 0.6);
       else if (indicator !== 'none') raster.drawBadge(img, 'pause', S / 2, S / 2, 34, 0.5);
     }
-    const uri = raster.encodeJpeg(img, 90);
+    const uri = raster.encodePng(img);
     this.rendered.set(key, uri);
     return uri;
   }
@@ -168,7 +184,7 @@ class ArtCache {
     const base = await this.cover(artUrl);
     if (!base) return null;
     const img = raster.dim(raster.cloneImage(base), brightness);
-    const uri = raster.encodeJpeg(img, 88);
+    const uri = raster.encodePng(img);
     this.rendered.set(key, uri);
     return uri;
   }

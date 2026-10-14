@@ -39,14 +39,25 @@ function crc32(buf) {
   return (c ^ -1) >>> 0;
 }
 
+// Scratch buffers reused between frames, one per frame size, so encoding doesn't allocate
+// a fresh row buffer many times a second.
+const pngScratch = new Map();
+
 /**
- * PNG data URI (RGB, Sub filter, fast zlib). Several times quicker than JPEG in pure JS,
- * which matters for visualizer frames drawn many times a second.
+ * PNG data URI (RGB, Sub filter). Far quicker than JPEG in pure JS, which matters for
+ * visualizer frames drawn many times a second. zlib runs with a small window (24 KB of
+ * working memory instead of 256 KB): the same output size for key-sized images, and small
+ * allocations the memory allocator can reuse instead of letting the process grow.
  */
 function encodePng(img) {
   const { width: w, height: h, data } = img;
   const stride = w * 3 + 1;
-  const raw = Buffer.alloc(stride * h);
+  const key = `${w}x${h}`;
+  let raw = pngScratch.get(key);
+  if (!raw) {
+    raw = Buffer.alloc(stride * h);
+    pngScratch.set(key, raw);
+  }
   for (let y = 0; y < h; y++) {
     const row = y * stride;
     raw[row] = 1; // Sub: each byte minus the one to its left
@@ -77,12 +88,17 @@ function encodePng(img) {
   const png = Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     chunk('IHDR', ihdr),
-    chunk('IDAT', require('zlib').deflateSync(raw, { level: 2 })),
+    chunk('IDAT', require('zlib').deflateSync(raw, { level: 2, windowBits: 12, memLevel: 4 })),
     chunk('IEND', Buffer.alloc(0)),
   ]);
   return `data:image/png;base64,${png.toString('base64')}`;
 }
 
+/**
+ * JPEG data URI. Not used for key images: jpeg-js rebuilds its encoding tables (two
+ * 65,535-entry arrays among them) on every call, costing ~45 ms and ~35 MB of short-lived
+ * memory per image. Kept for the tests, which use it to make cover files.
+ */
 function encodeJpeg(img, quality = 90) {
   const out = jpeg.encode({ width: img.width, height: img.height, data: img.data }, quality);
   return `data:image/jpeg;base64,${out.data.toString('base64')}`;
@@ -306,12 +322,14 @@ function drawBadge(img, kind, cx, cy, r, discOpacity = 0.55) {
  */
 function drawBars(img, levels, { style = 'bottom', color = [255, 255, 255], opacity = 0.92 } = {}) {
   const S = img.width;
+  const k = S / 144; // proportions are designed on the 144 px canvas and scale to the key size
   const n = levels.length;
-  const margin = 9;
-  const gap = 2.2;
+  const margin = 9 * k;
+  const gap = 2.2 * k;
   const barW = (S - margin * 2 - gap * (n - 1)) / n;
-  const rad = Math.min(barW / 2, 2.6);
-  const minH = 3; // a resting dot so the bars are visible during quiet passages
+  const rad = Math.min(barW / 2, 2.6 * k);
+  const minH = 3 * k; // a resting dot so the bars are visible during quiet passages
+  const edge = Math.max(0.8, 1.2 * k);
   for (let i = 0; i < n; i++) {
     const v = Math.max(0, Math.min(1, levels[i]));
     const x0 = margin + i * (barW + gap);
@@ -326,7 +344,7 @@ function drawBars(img, levels, { style = 'bottom', color = [255, 255, 255], opac
       y1 = bottom;
       y0 = bottom - (minH + v * (S * 0.58));
     }
-    draw(img, shapes.roundRect(x0 - 1.2, y0 - 1.2, x1 + 1.2, y1 + 1.2, rad + 1.2), [0, 0, 0], 0.5);
+    draw(img, shapes.roundRect(x0 - edge, y0 - edge, x1 + edge, y1 + edge, rad + edge), [0, 0, 0], 0.5);
     draw(img, shapes.roundRect(x0, y0, x1, y1, rad), color, opacity);
   }
   return img;

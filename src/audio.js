@@ -36,6 +36,7 @@ function makeFft(n) {
   for (let i = 0; i < n; i++) window[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1)); // Hann
   const re = new Float64Array(n);
   const im = new Float64Array(n);
+  const out = new Float64Array(n / 2 + 1); // reused: callers read it before the next call
 
   /** Magnitudes of bins 0..n/2 for n real samples (already scaled to -1..1). */
   return function magnitudes(samples) {
@@ -60,7 +61,6 @@ function makeFft(n) {
         }
       }
     }
-    const out = new Float64Array(n / 2 + 1);
     for (let i = 0; i <= n / 2; i++) out[i] = Math.hypot(re[i], im[i]) / (n / 4); // Hann gain ≈ 0.5
     return out;
   };
@@ -89,6 +89,7 @@ class Analyser {
     this.fft = makeFft(size);
     this.edges = bandEdges(bands, rate, size);
     this.levels = new Float64Array(bands);
+    this.raw = new Float64Array(bands);
     this.ceiling = -18; // dB, adapts to the music
     this.range = 42; // dB shown between floor and ceiling
   }
@@ -100,7 +101,7 @@ class Analyser {
   update(samples) {
     const mags = this.fft(samples);
     const bands = this.levels.length;
-    const raw = new Float64Array(bands);
+    const raw = this.raw;
     let loudest = -Infinity;
     for (let b = 0; b < bands; b++) {
       let sum = 0;
@@ -199,6 +200,7 @@ class AudioMeter extends EventEmitter {
     this.log = log;
     this.analyser = new Analyser({ bands });
     this.ring = new Float64Array(FFT_SIZE);
+    this.window = new Float64Array(FFT_SIZE); // reused for each analysis
     this.ringPos = 0;
     this.fresh = 0; // samples received since the last analysis
     this.lastData = 0;
@@ -352,7 +354,7 @@ class AudioMeter extends EventEmitter {
     if (Date.now() - this.lastData > 300) return this.analyser.decay();
     if (this.fresh > 0) {
       this.fresh = 0;
-      const win = new Float64Array(FFT_SIZE);
+      const win = this.window;
       for (let i = 0; i < FFT_SIZE; i++) win[i] = this.ring[(this.ringPos + i) % FFT_SIZE];
       return this.analyser.update(win);
     }

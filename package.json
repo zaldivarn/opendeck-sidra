@@ -1,6 +1,6 @@
 {
   "name": "sidra-opendeck",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Sidra Companion Plugin: an OpenDeck plugin for the Sidra Apple Music client on Linux",
   "author": "zaldivarn",
   "main": "src/plugin.js",
