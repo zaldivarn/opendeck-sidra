@@ -14,6 +14,12 @@
   select, input[type=number], input[type=text] { width: 100%; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--field); color: inherit; font: inherit; }
   input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
   .check { display: flex; align-items: center; gap: 8px; }
+  .colour { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .colour input[type=color] { width: 32px; height: 26px; padding: 0 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--field); cursor: pointer; }
+  .colour input[type=text] { width: 84px; font-family: ui-monospace, monospace; }
+  .swatch { width: 18px; height: 18px; padding: 0; border-radius: 50%; border: 1px solid var(--line); cursor: pointer; }
+  .swatch:hover { border-color: #fff; }
+  .row[hidden] { display: none; }
   button { padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--field); color: inherit; font: inherit; cursor: pointer; white-space: nowrap; }
   button:hover { border-color: var(--accent); background: var(--field-hover); }
   .status { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; }
@@ -43,6 +49,59 @@
     <div class="row"><label for="dimWhenPaused">Paused art</label>
       <span class="check"><input type="checkbox" id="dimWhenPaused" data-setting="dimWhenPaused"><label for="dimWhenPaused">Dim the album art</label></span></div>
     <p class="hint">While a song is playing the key shows just the album art.</p>
+    <h3>Song text</h3>
+    <div class="row"><label for="textFields">Show</label>
+      <select id="textFields" data-setting="textFields">
+        <option value="none">Off</option>
+        <option value="title">Song</option>
+        <option value="artist">Artist</option>
+        <option value="title-artist">Song + artist</option>
+        <option value="artist-title">Artist + song</option>
+      </select></div>
+    <div class="row" id="textScrollRow"><label for="textScroll">Long text</label>
+      <span class="check"><input type="checkbox" id="textScroll" data-setting="textScroll"><label for="textScroll">Scroll instead of cutting off</label></span></div>
+    <div class="row" id="textCharsRow"><label for="textLineChars">Characters / line</label>
+      <input type="number" id="textLineChars" data-setting="textLineChars" min="4" max="40" step="1"></div>
+    <p class="hint" id="textHint">Shown as the key's title, so its position, size and colour follow OpenDeck's title settings for this key. The cover darkens behind it to keep it readable.</p>
+
+    <h3>Visualizer</h3>
+    <div class="row"><label for="viz">Audio bars</label>
+      <span class="check"><input type="checkbox" id="viz" data-setting="viz"><label for="viz">Show while playing</label></span></div>
+    <div class="row viz-row"><label for="vizStyle">Style</label>
+      <select id="vizStyle" data-setting="vizStyle">
+        <option value="bottom">Bars from the bottom</option>
+        <option value="center">Bars mirrored from the centre</option>
+      </select></div>
+    <div class="row viz-row"><label for="vizColorMode">Colour</label>
+      <select id="vizColorMode" data-setting="vizColorMode">
+        <option value="album">Taken from the album art</option>
+        <option value="custom">Custom colour</option>
+      </select></div>
+    <div class="row viz-row" id="vizColorRow"><label for="vizColorPicker">Custom colour</label>
+      <span class="colour">
+        <input type="color" id="vizColorPicker" value="#ffffff" aria-label="Pick a colour">
+        <input type="text" id="vizColor" data-setting="vizColor" maxlength="7" spellcheck="false" aria-label="Hex colour">
+        <button type="button" class="swatch" data-colour="#ffffff" style="background:#ffffff" title="White"></button>
+        <button type="button" class="swatch" data-colour="#ffcc4d" style="background:#ffcc4d" title="Gold"></button>
+        <button type="button" class="swatch" data-colour="#fa2d55" style="background:#fa2d55" title="Pink"></button>
+        <button type="button" class="swatch" data-colour="#3ad1ff" style="background:#3ad1ff" title="Cyan"></button>
+        <button type="button" class="swatch" data-colour="#44e07a" style="background:#44e07a" title="Green"></button>
+        <button type="button" class="swatch" data-colour="#a77bff" style="background:#a77bff" title="Purple"></button>
+      </span></div>
+    <div class="row viz-row"><label for="vizFps">Smoothness</label>
+      <select id="vizFps" data-setting="vizFps">
+        <option value="low">Low (8 fps)</option>
+        <option value="medium">Medium (12 fps)</option>
+        <option value="high">High (20 fps)</option>
+      </select></div>
+    <div class="row viz-row"><label for="vizSource">Listen to</label>
+      <select id="vizSource" data-setting="vizSource">
+        <option value="sidra">Sidra only</option>
+        <option value="all">Everything playing</option>
+      </select></div>
+    <div class="status viz-row" style="margin:6px 0 0"><div class="line"><span class="dot" id="vizDot"></span><span id="vizText">Visualizer status appears here</span></div></div>
+    <p class="hint viz-row">Reads Sidra's audio from PipeWire or PulseAudio with <code>parec</code> (from libpulse / pulseaudio-utils). It only listens; your sound isn't changed.</p>
+
     <h3>Gestures</h3>
     <div class="row"><label for="holdAction">Hold</label>
       <select id="holdAction" data-setting="holdAction">
@@ -127,7 +186,12 @@
 <script>
   'use strict';
   const DEFAULTS = {
-    'com.zaldivarn.sidra.playpauseart': { indicator: 'auto', dimWhenPaused: true, launchWhenClosed: true, launchCommand: '', holdAction: 'next', holdTime: 'normal', doubleTapAction: 'none', doubleTapTime: 'normal' },
+    'com.zaldivarn.sidra.playpauseart': {
+      indicator: 'auto', dimWhenPaused: true, launchWhenClosed: true, launchCommand: '',
+      holdAction: 'next', holdTime: 'normal', doubleTapAction: 'none', doubleTapTime: 'normal',
+      textFields: 'none', textScroll: true, textLineChars: 12,
+      viz: false, vizStyle: 'bottom', vizColorMode: 'album', vizColor: '#ffffff', vizFps: 'medium', vizSource: 'sidra',
+    },
     'com.zaldivarn.sidra.nowplaying': { fields: 'title-artist', background: 'art', scroll: true, lineChars: 12, speed: 'normal', press: 'raise' },
   };
   let ws = null, ctx = null, action = null, settings = {};
@@ -179,6 +243,13 @@
       el.textContent = s.launch.message;
       el.style.color = s.launch.ok ? '' : '#ff9f0a';
     }
+    if (s.viz) {
+      $('vizDot').className = 'dot ' + (s.viz.ok ? 'ok' : s.viz.warn ? '' : 'bad');
+      $('vizText').textContent = s.viz.message;
+    } else if (!$('viz').checked) {
+      $('vizDot').className = 'dot';
+      $('vizText').textContent = 'Visualizer is off';
+    }
     if (s.cdp) {
       $('cdpDot').className = 'dot ' + (s.cdp.ok ? 'ok' : 'bad');
       $('cdpText').textContent = s.cdp.message;
@@ -193,6 +264,15 @@
       $(row).style.opacity = on ? '' : '0.45';
       $(field).disabled = !on;
     }
+    // Song text: the scroll/width rows only matter when text is on.
+    const textOn = $('textFields').value !== 'none';
+    for (const id of ['textScrollRow', 'textCharsRow']) $(id).style.opacity = textOn ? '' : '0.45';
+    $('textScroll').disabled = $('textLineChars').disabled = !textOn;
+    // Visualizer: hide its options until it's switched on; custom colour only in custom mode.
+    const vizOn = $('viz').checked;
+    document.querySelectorAll('.viz-row').forEach((el) => (el.hidden = !vizOn));
+    $('vizColorRow').hidden = !vizOn || $('vizColorMode').value !== 'custom';
+    $('vizColorPicker').value = normHex($('vizColor').value) || '#ffffff';
     const hold = $('holdAction').value !== 'none', dbl = $('doubleTapAction').value !== 'none';
     $('gestureHint').textContent =
       hold && dbl ? 'A single tap still plays/pauses — after you let go, once the double-tap wait has passed.'
@@ -201,10 +281,33 @@
       : 'A tap plays/pauses as soon as you press the key.';
   }
 
+  function normHex(v) {
+    const m = /^#?([0-9a-f]{6}|[0-9a-f]{3})$/i.exec(String(v || '').trim());
+    if (!m) return null;
+    const h = m[1].length === 3 ? m[1].split('').map((c) => c + c).join('') : m[1];
+    return '#' + h.toLowerCase();
+  }
+
+  function setColour(hex) {
+    $('vizColor').value = hex;
+    $('vizColorPicker').value = hex;
+    save();
+  }
+
   document.addEventListener('change', (e) => {
+    if (e.target.id === 'vizColor') {
+      // Accept "fa2d55", "#FA2D55" or "#f25"; put back the last good value otherwise.
+      const hex = normHex(e.target.value);
+      e.target.value = hex || settings.vizColor || '#ffffff';
+      $('vizColorPicker').value = e.target.value;
+    }
     if (e.target.matches('[data-setting]')) save();
-    if (['launchWhenClosed', 'holdAction', 'doubleTapAction'].includes(e.target.id)) syncEnabled();
+    if (['launchWhenClosed', 'holdAction', 'doubleTapAction', 'textFields', 'viz', 'vizColorMode'].includes(e.target.id)) syncEnabled();
   });
+  // The picker updates live while dragging; save once it settles.
+  $('vizColorPicker').addEventListener('input', (e) => ($('vizColor').value = e.target.value));
+  $('vizColorPicker').addEventListener('change', (e) => setColour(e.target.value));
+  document.querySelectorAll('.swatch').forEach((b) => b.addEventListener('click', () => setColour(b.dataset.colour)));
   $('savePort').addEventListener('click', () => {
     $('cdpText').textContent = 'Testing…';
     toPlugin({ type: 'setCdpPort', cdpPort: Number($('cdpPort').value) });

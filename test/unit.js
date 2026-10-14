@@ -174,6 +174,86 @@ t("OpenDeck's AppImage packaging is scrubbed from the environment Sidra gets", (
   assert.deepEqual(env, { HOME: '/home/user', PATH: '/usr/bin', WAYLAND_DISPLAY: 'wayland-0' });
 });
 
+// ---- Visualizer: analysis and drawing ----
+const audio = require('../src/audio');
+
+function tone(hz, n = audio.FFT_SIZE, amp = 0.5) {
+  const out = new Float64Array(n);
+  for (let i = 0; i < n; i++) out[i] = amp * Math.sin((2 * Math.PI * hz * i) / audio.RATE);
+  return out;
+}
+const peakBand = (levels) => Array.from(levels).indexOf(Math.max(...levels));
+
+t('analyser: a low tone lifts a low bar, a high tone a high bar; silence settles to zero', () => {
+  const edges = audio.bandEdges();
+  assert.equal(edges.length, audio.BANDS + 1);
+  for (let i = 1; i < edges.length; i++) assert.ok(edges[i] > edges[i - 1], 'band edges strictly increase');
+  const lowA = new audio.Analyser();
+  for (let i = 0; i < 10; i++) lowA.update(tone(110));
+  const highA = new audio.Analyser();
+  for (let i = 0; i < 10; i++) highA.update(tone(4000));
+  assert.ok(peakBand(lowA.levels) <= 4, `110 Hz peaks in band ${peakBand(lowA.levels)}`);
+  assert.ok(peakBand(highA.levels) >= 12, `4 kHz peaks in band ${peakBand(highA.levels)}`);
+  assert.ok(Math.max(...lowA.levels) > 0.8);
+  for (let i = 0; i < 30; i++) lowA.update(new Float64Array(audio.FFT_SIZE));
+  assert.ok(Math.max(...lowA.levels) < 0.05, 'silence falls back to rest');
+});
+
+t('analyser adapts: a quiet song still fills the bars after a moment', () => {
+  const a = new audio.Analyser();
+  for (let i = 0; i < 200; i++) a.update(tone(440, audio.FFT_SIZE, 0.01)); // -46 dBFS
+  assert.ok(Math.max(...a.levels) > 0.7, `quiet tone level ${Math.max(...a.levels).toFixed(2)}`);
+});
+
+t("Sidra's stream is recognised by app name or binary, from pactl JSON or text", () => {
+  assert.ok(audio.looksLikeSidra({ 'application.name': 'Sidra' }));
+  assert.ok(audio.looksLikeSidra({ 'application.name': 'Chromium', 'application.process.binary': 'sidra' }));
+  assert.ok(!audio.looksLikeSidra({ 'application.name': 'Firefox', 'application.process.binary': 'firefox' }));
+  const text = [
+    'Sink Input #12',
+    '\tDriver: protocol-native.c',
+    '\tCorked: no',
+    '\tProperties:',
+    '\t\tapplication.name = "Firefox"',
+    'Sink Input #57',
+    '\tCorked: yes',
+    '\tProperties:',
+    '\t\tapplication.name = "Sidra"',
+    '\t\tapplication.process.binary = "sidra"',
+  ].join('\n');
+  const parsed = audio.parsePactlText(text);
+  assert.deepEqual(parsed.map((s) => [s.index, s.corked, s.properties['application.name']]), [[12, false, 'Firefox'], [57, true, 'Sidra']]);
+});
+
+t('bars: bottom style rises from the bottom edge, centre style is mirrored about the middle', () => {
+  const lum = (img, x, y) => img.data[(y * 144 + x) * 4];
+  const levels = new Array(16).fill(0);
+  levels[7] = 1; // one full-height bar
+  const bottom = raster.drawBars(raster.createImage(144, 144, [0, 0, 0]), levels, { style: 'bottom', color: [255, 255, 255] });
+  const bx = Math.round(9 + 7 * ((144 - 18 - 2.2 * 15) / 16 + 2.2) + 2.9); // middle of bar 7
+  assert.ok(lum(bottom, bx, 130) > 200 && lum(bottom, bx, 60) > 200, 'tall bar from the bottom');
+  assert.ok(lum(bottom, bx, 30) < 40, 'stops below the top');
+  assert.ok(lum(bottom, 20, 100) < 40, 'quiet bars stay short');
+  const centre = raster.drawBars(raster.createImage(144, 144, [0, 0, 0]), levels, { style: 'center', color: [255, 255, 255] });
+  assert.ok(lum(centre, bx, 72) > 200 && lum(centre, bx, 40) > 200 && lum(centre, bx, 104) > 200, 'mirrored about the middle');
+  assert.ok(lum(centre, bx, 135) < 40, 'leaves the bottom edge clear');
+});
+
+t('album colour: a contrasting colour from the cover, else a light tint of its main colour', () => {
+  // Purple sky with a yellow sun: the sun's colour wins, so bars stand out from the sky.
+  const sunset = raster.createImage(144, 144, [110, 40, 150]);
+  for (let y = 30; y < 70; y++) for (let x = 50; x < 95; x++) sunset.data.set([250, 210, 70], (y * 144 + x) * 4);
+  const [r1, g1, b1] = raster.accentColour(sunset);
+  assert.ok(r1 > 200 && g1 > 160 && b1 < 120, `sunset → ${[r1, g1, b1]}`);
+  // One colour only: a light tint of it, which reads over the cover itself.
+  const [r2, g2, b2] = raster.accentColour(raster.createImage(144, 144, [170, 20, 40]));
+  assert.ok(r2 > 220 && r2 > g2 && r2 > b2 && g2 > 150, `red cover → ${[r2, g2, b2]}`);
+  // Greyscale: soft white.
+  assert.deepEqual(raster.accentColour(raster.createImage(144, 144, [128, 128, 128])), [235, 235, 240]);
+  assert.deepEqual(raster.parseHex('#3AD1FF'), [58, 209, 255]);
+  assert.deepEqual(raster.parseHex('nope', [1, 2, 3]), [1, 2, 3]);
+});
+
 // ---- Play/Pause (Album Art) key rendering, checked at the pixel level ----
 (async () => {
   const os = require('os');

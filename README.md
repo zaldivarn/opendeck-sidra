@@ -4,7 +4,7 @@
 
 | Action | What it does |
 |---|---|
-| **Play/Pause (Album Art)** | Toggles playback. The key shows the current cover: just the album art while playing; dimmed with a pause icon while paused. Hold and/or double-tap it for Next, Previous or Replay (your choice). When Sidra is closed, pressing it opens Sidra. |
+| **Play/Pause (Album Art)** | Toggles playback. The key shows the current cover: just the album art while playing; dimmed with a pause icon while paused. Can show the song and artist, and an audio visualizer over the cover. Hold and/or double-tap it for Next, Previous or Replay (your choice). When Sidra is closed, pressing it opens Sidra. |
 | **Play** | Starts playback. |
 | **Pause** | Pauses playback. |
 | **Next Song** | Skips forward. |
@@ -20,6 +20,7 @@ Everything except Add to Library talks to Sidra over MPRIS (`org.mpris.MediaPlay
 - OpenDeck 2.x on Linux
 - Node.js 20 or newer on the host. OpenDeck runs JavaScript plugins with the system `node` (Arch: `sudo pacman -S nodejs`, Fedora: `sudo dnf install nodejs`, Debian/Ubuntu: `sudo apt install nodejs`). The Flatpak build of OpenDeck also uses the host's Node through `flatpak-spawn`.
 - Sidra (any install method)
+- For the visualizer only: `parec` and `pactl`, which work with both PipeWire and PulseAudio (Arch: `libpulse`, Fedora/Debian/Ubuntu: `pulseaudio-utils` — usually already installed)
 
 ## Install
 
@@ -56,6 +57,19 @@ Select a key in OpenDeck to see its settings.
 
 **Play/Pause (Album Art)** — while playing the key is always just the cover. *Paused icon*: a large centred pause icon (default), a small one in the corner, or none. *Dim the album art* when paused (on by default).
 
+*Song text* — show the *Song*, *Artist*, *Song + artist* or *Artist + song* on the key (off by default). Long names scroll, or switch scrolling off to cut them off instead; *Characters / line* sets the width. The text is drawn as the key's title, so its position, size and colour follow OpenDeck's title settings for the key (new keys start small, at the bottom). The cover darkens behind the text, wherever you put it, so it stays readable.
+
+*Visualizer* — audio bars over the cover while Sidra is playing (off by default):
+
+![Visualizer styles and colours, rendered from a test signal](docs/visualizer.png)
+
+- **Style:** bars rising from the bottom, or mirrored from the centre (better with song text at the bottom).
+- **Colour:** *Taken from the album art* picks a colour that stands out from each cover (a second colour on the cover when it has one, otherwise a light tint of its main colour), changing with every song. *Custom colour* uses the colour picker, a hex code or one of the swatches.
+- **Smoothness:** 8, 12 or 20 frames a second.
+- **Listen to:** *Sidra only* (default) records Sidra's own audio stream, so other apps' sound doesn't move the bars; *Everything playing* uses the whole output.
+
+The bars come from Sidra's actual audio: the plugin records Sidra's stream from PipeWire or PulseAudio with `parec`, which only listens and doesn't change what you hear. Capture runs only while a visualizer key is visible and Sidra is playing; pausing stops it. The settings panel shows what it's doing, e.g. *Listening to Sidra's audio*. If `parec` or `pactl` is missing, it falls back to PipeWire's `pw-record` on everything playing, and says so.
+
 *Gestures* — a tap always plays/pauses. On top of that:
 - **Hold** (default *Next song*): hold the key past *Hold for* (*Short* 0.35 s, *Normal* 0.5 s, *Long* 0.8 s) to run its action — one per hold.
 - **Double-tap** (default *Off*): two taps within *Tap speed* (*Fast* 0.25 s, *Normal* 0.35 s, *Relaxed* 0.5 s) run its action.
@@ -77,6 +91,7 @@ All keys show the Sidra connection state and current track at the top of the set
 - Covers are taken from `mpris:artUrl`. Sidra publishes Apple's CDN URL first, then switches to its local cache copy (`~/.cache/sidra/artwork`); the plugin asks the CDN for a 288px rendition and handles the cached file too (including PNG covers saved under a `.jpg` name).
 - Add to Library works for catalogue songs and music videos. Radio stations and shows aren't supported and show an alert. Songs you're playing *from* your library show the check straight away.
 - The check on the Add to Library key is also refreshed on each track change by asking Apple whether the song is already in your library. That lookup is best-effort: if it fails, the key just shows the plus until you press it.
+- The visualizer costs about 5 ms of CPU per frame in the plugin (roughly 5% of one core at 12 fps), plus OpenDeck drawing the key.
 - Plugin log: `~/.local/share/opendeck/logs/plugins/com.zaldivarn.sidra.sdPlugin.log` (Flatpak: under `~/.var/app/me.amankhanna.opendeck/`).
 
 ## Licence
@@ -97,7 +112,7 @@ npm test          # unit checks + end-to-end run (needs dbus-run-session)
 
 The build bundles everything into `com.zaldivarn.sidra.sdPlugin/bin/plugin.js` with esbuild, so the installed plugin needs only Node — no `node_modules`, no native add-ons. Album art is decoded, resized and composited in pure JS.
 
-`npm test` starts a private D-Bus session with a mock Sidra MPRIS service (modelled on Sidra's own implementation), a mock OpenDeck host, a mock DevTools endpoint running the injected script against a fake MusicKit, a local stand-in for Apple's artwork CDN, and a temporary applications folder whose `sidra.desktop` starts a stand-in Sidra process, then drives every action through the bundled plugin.
+`npm test` starts a private D-Bus session with a mock Sidra MPRIS service (modelled on Sidra's own implementation), a mock OpenDeck host, a mock DevTools endpoint running the injected script against a fake MusicKit, a local stand-in for Apple's artwork CDN, a temporary applications folder whose `sidra.desktop` starts a stand-in Sidra process, and stand-in `pactl`/`parec` commands that stream test audio for the visualizer, then drives every action through the bundled plugin.
 
 ### Layout
 
@@ -106,6 +121,7 @@ src/plugin.js     action wiring and key rendering
 src/mpris.js      Sidra MPRIS client (dbus-next): watch, mirror state, send commands
 src/library.js    Add to Library over the DevTools protocol
 src/launcher.js   find Sidra's desktop entry and start it (album-art key, Sidra closed)
+src/audio.js      visualizer: capture Sidra's audio stream (parec), FFT → bar heights
 src/art.js        cover loading + key compositing      src/raster.js  pixel helpers
 src/png.js        tiny PNG decoder                      src/text.js    wrap / marquee
 src/icons.js      SVG key art                           src/opendeck.js  SDK socket

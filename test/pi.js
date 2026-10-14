@@ -60,7 +60,13 @@ console.log('settings page');
     assert.equal(cb.checked, true);
     cb.checked = false;
     cb.dispatchEvent(new w.Event('change', { bubbles: true }));
-    assert.deepEqual(sent.find((m) => m.event === 'setSettings').payload, { indicator: 'auto', dimWhenPaused: false, launchWhenClosed: true, launchCommand: '', holdAction: 'next', holdTime: 'normal', doubleTapAction: 'none', doubleTapTime: 'normal' });
+    assert.deepEqual(sent.find((m) => m.event === 'setSettings').payload, {
+      indicator: 'auto', dimWhenPaused: false,
+      textFields: 'none', textScroll: true, textLineChars: 12,
+      viz: false, vizStyle: 'bottom', vizColorMode: 'album', vizColor: '#ffffff', vizFps: 'medium', vizSource: 'sidra',
+      holdAction: 'next', holdTime: 'normal', doubleTapAction: 'none', doubleTapTime: 'normal',
+      launchWhenClosed: true, launchCommand: '',
+    });
     // "Opens Sidra" toggle: on by default; turning it off greys out the command and saves.
     const toggle = d.getElementById('launchWhenClosed');
     assert.equal(toggle.checked, true);
@@ -110,6 +116,49 @@ console.log('settings page');
     assert.equal(saved.holdAction, 'none');
     assert.equal('holdToSkip' in saved, false);
     console.log('  ✓ v1.3 hold-to-skip setting carries over');
+  }
+  {
+    // Song text + visualizer controls.
+    const { w, sent, ws } = open('com.zaldivarn.sidra.playpauseart', {});
+    await tick();
+    const d = w.document;
+    const change = (el) => el.dispatchEvent(new w.Event('change', { bubbles: true }));
+    const lastSave = () => sent.filter((m) => m.event === 'setSettings').pop().payload;
+    // Song text off: its scroll/width options are greyed out.
+    assert.equal(d.getElementById('textFields').value, 'none');
+    assert.equal(d.getElementById('textScroll').disabled, true);
+    d.getElementById('textFields').value = 'artist-title';
+    change(d.getElementById('textFields'));
+    assert.equal(d.getElementById('textScroll').disabled, false);
+    assert.equal(lastSave().textFields, 'artist-title');
+    // Visualizer off: its options are hidden; on: shown, custom colour row only in custom mode.
+    const vizRows = () => [...d.querySelectorAll('.viz-row')];
+    assert.ok(vizRows().every((r) => r.hidden));
+    d.getElementById('viz').checked = true;
+    change(d.getElementById('viz'));
+    assert.ok(vizRows().filter((r) => r.id !== 'vizColorRow').every((r) => !r.hidden));
+    assert.equal(d.getElementById('vizColorRow').hidden, true, 'album colour mode hides the picker');
+    d.getElementById('vizColorMode').value = 'custom';
+    change(d.getElementById('vizColorMode'));
+    assert.equal(d.getElementById('vizColorRow').hidden, false);
+    // Swatch, picker and hex box all set the same saved colour.
+    d.querySelector('.swatch[data-colour="#3ad1ff"]').click();
+    assert.equal(lastSave().vizColor, '#3ad1ff');
+    assert.equal(d.getElementById('vizColorPicker').value, '#3ad1ff');
+    const hex = d.getElementById('vizColor');
+    hex.value = 'F25';
+    change(hex);
+    assert.equal(lastSave().vizColor, '#ff2255');
+    hex.value = 'not a colour';
+    change(hex);
+    assert.equal(hex.value, '#ff2255', 'invalid input falls back to the last good colour');
+    assert.equal(lastSave().vizColor, '#ff2255');
+    assert.equal(lastSave().viz, true);
+    // Status line from the plugin.
+    ws().onmessage({ data: JSON.stringify({ event: 'sendToPropertyInspector', payload: { type: 'status', sidra: 'connected', playback: 'Playing', viz: { ok: true, message: "Listening to Sidra's audio" } } }) });
+    assert.equal(d.getElementById('vizText').textContent, "Listening to Sidra's audio");
+    assert.equal(d.getElementById('vizDot').className, 'dot ok');
+    console.log('  ✓ song text and visualizer settings');
   }
   // Add to Library: status from plugin, port save.
   {

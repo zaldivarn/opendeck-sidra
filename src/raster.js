@@ -27,6 +27,62 @@ function decodeJpeg(buf) {
   return jpeg.decode(buf, { useTArray: false, formatAsRGBA: true, maxMemoryUsageInMB: 256, maxResolutionInMP: 40 });
 }
 
+// CRC-32 for PNG chunks.
+const CRC_TABLE = new Int32Array(256).map((_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c;
+});
+function crc32(buf) {
+  let c = -1;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+
+/**
+ * PNG data URI (RGB, Sub filter, fast zlib). Several times quicker than JPEG in pure JS,
+ * which matters for visualizer frames drawn many times a second.
+ */
+function encodePng(img) {
+  const { width: w, height: h, data } = img;
+  const stride = w * 3 + 1;
+  const raw = Buffer.alloc(stride * h);
+  for (let y = 0; y < h; y++) {
+    const row = y * stride;
+    raw[row] = 1; // Sub: each byte minus the one to its left
+    let pr = 0, pg = 0, pb = 0;
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const o = row + 1 + x * 3;
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      raw[o] = (r - pr) & 255;
+      raw[o + 1] = (g - pg) & 255;
+      raw[o + 2] = (b - pb) & 255;
+      pr = r; pg = g; pb = b;
+    }
+  }
+  const chunk = (type, body) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(body.length);
+    const tb = Buffer.concat([Buffer.from(type, 'ascii'), body]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(tb));
+    return Buffer.concat([len, tb, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // RGB
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', require('zlib').deflateSync(raw, { level: 2 })),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+  return `data:image/png;base64,${png.toString('base64')}`;
+}
+
 function encodeJpeg(img, quality = 90) {
   const out = jpeg.encode({ width: img.width, height: img.height, data: img.data }, quality);
   return `data:image/jpeg;base64,${out.data.toString('base64')}`;
@@ -109,6 +165,40 @@ function bottomShade(img, start = 0.45, strength = 0.75) {
     const t = y / (h - 1);
     if (t < start) continue;
     const f = 1 - strength * ((t - start) / (1 - start));
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      data[i] = Math.round(data[i] * f);
+      data[i + 1] = Math.round(data[i + 1] * f);
+      data[i + 2] = Math.round(data[i + 2] * f);
+    }
+  }
+  return img;
+}
+
+/** Darken towards the top edge (for a title drawn at the top). */
+function topShade(img, end = 0.55, strength = 0.75) {
+  const { width: w, height: h, data } = img;
+  for (let y = 0; y < h; y++) {
+    const t = y / (h - 1);
+    if (t > end) break;
+    const f = 1 - strength * ((end - t) / end);
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      data[i] = Math.round(data[i] * f);
+      data[i + 1] = Math.round(data[i + 1] * f);
+      data[i + 2] = Math.round(data[i + 2] * f);
+    }
+  }
+  return img;
+}
+
+/** Darken a horizontal band through the middle (for a centred title). */
+function middleShade(img, strength = 0.55) {
+  const { width: w, height: h, data } = img;
+  for (let y = 0; y < h; y++) {
+    const d = Math.abs(y / (h - 1) - 0.5) / 0.32; // 0 at centre, 1 at the band's edge
+    if (d >= 1) continue;
+    const f = 1 - strength * (1 - d * d);
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
       data[i] = Math.round(data[i] * f);
@@ -207,8 +297,123 @@ function drawBadge(img, kind, cx, cy, r, discOpacity = 0.55) {
   else drawPauseGlyph(img, cx, cy, r * 0.62);
 }
 
+// ---------------------------------------------------------------- visualizer
+
+/**
+ * Audio bars over the cover. levels: 0..1 per bar. style: 'bottom' (rise from the bottom
+ * edge) or 'center' (mirrored about the middle). Each bar gets a soft dark outline so it
+ * reads on light and busy covers alike.
+ */
+function drawBars(img, levels, { style = 'bottom', color = [255, 255, 255], opacity = 0.92 } = {}) {
+  const S = img.width;
+  const n = levels.length;
+  const margin = 9;
+  const gap = 2.2;
+  const barW = (S - margin * 2 - gap * (n - 1)) / n;
+  const rad = Math.min(barW / 2, 2.6);
+  const minH = 3; // a resting dot so the bars are visible during quiet passages
+  for (let i = 0; i < n; i++) {
+    const v = Math.max(0, Math.min(1, levels[i]));
+    const x0 = margin + i * (barW + gap);
+    const x1 = x0 + barW;
+    let y0, y1;
+    if (style === 'center') {
+      const half = minH / 2 + v * (S * 0.36);
+      y0 = S / 2 - half;
+      y1 = S / 2 + half;
+    } else {
+      const bottom = S - margin;
+      y1 = bottom;
+      y0 = bottom - (minH + v * (S * 0.58));
+    }
+    draw(img, shapes.roundRect(x0 - 1.2, y0 - 1.2, x1 + 1.2, y1 + 1.2, rad + 1.2), [0, 0, 0], 0.5);
+    draw(img, shapes.roundRect(x0, y0, x1, y1, rad), color, opacity);
+  }
+  return img;
+}
+
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, l];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+  else if (max === g) h = ((b - r) / d + 2) / 6;
+  else h = ((r - g) / d + 4) / 6;
+  return [h, s, l];
+}
+
+function hslToRgb(h, s, l) {
+  if (s === 0) return [l, l, l].map((v) => Math.round(v * 255));
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const f = (t) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  return [f(h + 1 / 3), f(h), f(h - 1 / 3)].map((v) => Math.round(v * 255));
+}
+
+/**
+ * A colour from the cover that stands out against it, for bars drawn on top of it:
+ *  - if the cover has a second, clearly different colour (say a yellow sun on a purple sky),
+ *    use that one, brightened;
+ *  - otherwise use a light tint of its main colour, which reads over the darker cover;
+ *  - greyscale covers give a soft white.
+ */
+function accentColour(img) {
+  const bins = new Float64Array(36);
+  const sat = new Float64Array(36);
+  let total = 0;
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 16) {
+    const [h, s, l] = rgbToHsl(d[i], d[i + 1], d[i + 2]);
+    total++;
+    if (s < 0.25 || l < 0.12 || l > 0.92) continue;
+    const b = Math.floor(h * 36) % 36;
+    const w = s * (1 - Math.abs(l - 0.5));
+    bins[b] += w;
+    sat[b] += s * w;
+  }
+  const around = (b) => bins[b] + 0.5 * (bins[(b + 35) % 36] + bins[(b + 1) % 36]);
+  let main = -1, mainW = 0;
+  for (let b = 0; b < 36; b++) if (around(b) > mainW) { mainW = around(b); main = b; }
+  if (main < 0 || bins[main] < total * 0.02) return [235, 235, 240];
+  // A second colour at least 60° round the colour wheel, with a real presence on the cover.
+  let second = -1, secondW = 0;
+  for (let b = 0; b < 36; b++) {
+    const dist = Math.min(Math.abs(b - main), 36 - Math.abs(b - main));
+    if (dist >= 6 && around(b) > secondW) { secondW = around(b); second = b; }
+  }
+  const satOf = (b) => Math.max(0.6, Math.min(0.95, sat[b] / Math.max(1e-9, bins[b])));
+  if (second >= 0 && secondW >= mainW * 0.12 && bins[second] >= total * 0.01) {
+    return hslToRgb((second + 0.5) / 36, satOf(second), 0.62);
+  }
+  return hslToRgb((main + 0.5) / 36, satOf(main), 0.84);
+}
+
+function parseHex(hex, fallback = [255, 255, 255]) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+  if (!m) return fallback;
+  const v = parseInt(m[1], 16);
+  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+}
+
 module.exports = {
   KEY_SIZE,
+  encodePng,
+  topShade,
+  middleShade,
+  drawBars,
+  accentColour,
+  parseHex,
   createImage,
   cloneImage,
   decodeJpeg,

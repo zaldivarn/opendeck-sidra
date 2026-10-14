@@ -206,13 +206,46 @@ async function step(name, fn) {
       '',
     ].join('\n'),
   );
+  // Stand-ins for the sound server tools the visualizer uses: pactl lists a Sidra stream (and
+  // another app's), parec streams a pulsing 440 Hz + 1.5 kHz signal in real time and logs how it
+  // was started. (A perfectly steady tone would give identical frames, which the plugin skips.)
+  const fakeBin = path.join(desk, 'bin');
+  const parecLog = path.join(desk, 'parec.log');
+  fs.mkdirSync(fakeBin);
+  fs.writeFileSync(
+    path.join(fakeBin, 'pactl'),
+    `#!${process.execPath}\n` +
+      `const json = process.argv.includes('json');\n` +
+      `const list = [{ index: 3, corked: false, properties: { 'application.name': 'Firefox' } }, { index: 7, corked: false, properties: { 'application.name': 'Sidra', 'application.process.binary': 'sidra' } }];\n` +
+      `process.stdout.write(json ? JSON.stringify(list) : '');\n`,
+    { mode: 0o755 },
+  );
+  fs.writeFileSync(
+    path.join(fakeBin, 'parec'),
+    `#!${process.execPath}\n` +
+      `require('fs').appendFileSync(${JSON.stringify(parecLog)}, JSON.stringify({ pid: process.pid, args: process.argv.slice(2) }) + '\\n');\n` +
+      `const rate = 22050; let n = 0;\n` +
+      `setInterval(() => { const b = Buffer.alloc(441 * 2); for (let i = 0; i < 441; i++, n++) { const t = n / rate; const beat = 0.55 + 0.45 * Math.abs(Math.sin(Math.PI * 2.3 * t)); b.writeInt16LE(Math.round(9000 * beat * Math.sin(2 * Math.PI * 440 * t) + 3000 * Math.abs(Math.sin(Math.PI * 3.7 * t)) * Math.sin(2 * Math.PI * 1500 * t)), i * 2); } process.stdout.write(b); }, 20);\n` +
+      `process.on('SIGTERM', () => process.exit(0));\n`,
+    { mode: 0o755 },
+  );
+  const parecRuns = () => (fs.existsSync(parecLog) ? fs.readFileSync(parecLog, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const pluginEnv = {
     ...process.env,
     XDG_DATA_HOME: xdgHome,
     XDG_DATA_DIRS: xdgSys,
     APPIMAGE: '/home/user/Applications/OpenDeck.AppImage',
     APPDIR: '/tmp/.mount_OpenDeXYZ',
-    PATH: `/tmp/.mount_OpenDeXYZ/usr/bin:${process.env.PATH}`,
+    PATH: `${fakeBin}:/tmp/.mount_OpenDeXYZ/usr/bin:${process.env.PATH}`,
   };
 
   const logFile = OUT ? fs.createWriteStream(path.join(OUT, 'plugin.log')) : null;
@@ -632,6 +665,122 @@ async function step(name, fn) {
     assert.equal(count('Next'), nx);
     appear('art');
     await waitFor(() => /^data:image\/jpeg/.test(last(k('art').images)), 'art key back');
+  });
+
+  // ---------------------------------------------------------------- song text + visualizer
+  // Still frames are JPEG, visualizer frames PNG.
+  const jpegPixel = (uri, x, y) => {
+    const bytes = Buffer.from(uri.split(',')[1], 'base64');
+    const img = uri.startsWith('data:image/png') ? require('../src/png').decodePng(bytes) : require('jpeg-js').decode(bytes, { formatAsRGBA: true });
+    const i = (y * img.width + x) * 4;
+    return [img.data[i], img.data[i + 1], img.data[i + 2]];
+  };
+  const titleParams = (alignment) =>
+    send({
+      event: 'titleParametersDidChange',
+      action: ACTION.art,
+      context: C.art,
+      device: 'dev1',
+      payload: { settings: {}, titleParameters: { titleAlignment: alignment, showTitle: true, fontSize: 9 } },
+    });
+
+  await step('album-art key: song text is off by default and leaves the key title alone', async () => {
+    artSettings({});
+    await sleep(300);
+    const before = k('art').titles.length;
+    syncNowPlaying(0);
+    sidra.setTrack(0);
+    sidra.setStatus('Playing');
+    await waitFor(() => /^data:image\/jpeg/.test(last(k('art').images)), 'art for Sunrise');
+    await sleep(300);
+    assert.equal(k('art').titles.length, before, 'no setTitle while song text is off');
+  });
+
+  await step('album-art key: "Artist + song" text, cover darkened behind it at the title position', async () => {
+    titleParams('bottom');
+    const plain = last(k('art').images);
+    artSettings({ textFields: 'artist-title' });
+    await waitFor(() => last(k('art').titles) === 'The Testers\nSunrise', `art title, got ${JSON.stringify(last(k('art').titles))}`);
+    await waitFor(() => last(k('art').images) !== plain, 'shaded render');
+    const shaded = last(k('art').images);
+    const lum = (uri, y) => jpegPixel(uri, 72, y).reduce((a, b) => a + b, 0);
+    assert.ok(lum(shaded, 130) < lum(plain, 130) * 0.7, 'bottom darkened');
+    assert.ok(Math.abs(lum(shaded, 12) - lum(plain, 12)) < 30, 'top untouched');
+    titleParams('top');
+    await waitFor(() => last(k('art').images) !== shaded, 'shade moves to the top');
+    const top = last(k('art').images);
+    assert.ok(lum(top, 12) < lum(plain, 12) * 0.7, 'top darkened');
+    save('Play/Pause art · song text', 'art');
+    titleParams('bottom');
+  });
+
+  await step('album-art key: switching song text off clears the title it set', async () => {
+    artSettings({ textFields: 'none' });
+    await waitFor(() => last(k('art').titles) === '', 'title cleared');
+  });
+
+  await step("visualizer: captures only Sidra's stream and animates the key while playing", async () => {
+    const imgs = k('art').images.length;
+    artSettings({ viz: true, vizFps: 'medium' });
+    const run = await waitFor(() => parecRuns()[0], 'parec started', 5000);
+    assert.ok(run.args.includes('--monitor-stream=7'), `parec args ${run.args.join(' ')}`);
+    assert.ok(run.args.includes('--rate=22050') && run.args.includes('--channels=1'));
+    await waitFor(() => k('art').images.length > imgs + 5, 'frames arriving', 4000);
+    const n0 = k('art').images.length;
+    await sleep(1000);
+    const perSecond = k('art').images.length - n0;
+    assert.ok(perSecond >= 8 && perSecond <= 14, `~12 frames a second (got ${perSecond})`);
+    // 440 Hz lands in bar 6 of 16; it should be lit, and a high bar should be at rest.
+    const frame = last(k('art').images);
+    const barX = (i) => Math.round(9 + i * ((144 - 18 - 2.2 * 15) / 16 + 2.2) + 2.9);
+    const bright = (p) => p.reduce((a, b) => a + b, 0) / 3;
+    assert.ok(bright(jpegPixel(frame, barX(6), 100)) > 150, 'bar 6 is up');
+    assert.ok(bright(jpegPixel(frame, barX(14), 100)) < bright(jpegPixel(frame, barX(6), 100)) - 60, 'bar 14 stays low');
+    save('Play/Pause art · visualizer (album colour)', 'art');
+  });
+
+  await step('visualizer: custom colour', async () => {
+    artSettings({ viz: true, vizColorMode: 'custom', vizColor: '#ff2020' });
+    await sleep(500);
+    const frame = last(k('art').images);
+    const barX = Math.round(9 + 6 * ((144 - 18 - 2.2 * 15) / 16 + 2.2) + 2.9);
+    const [r, g, b] = jpegPixel(frame, barX, 110);
+    assert.ok(r > 200 && g < 110 && b < 110, `bar colour ${[r, g, b]}`);
+    artSettings({ viz: true, vizColorMode: 'custom', vizColor: '#ff2020', vizStyle: 'center', textFields: 'title' });
+    await waitFor(() => last(k('art').titles) === 'Sunrise', 'text with the visualizer');
+    await sleep(400);
+    save('Play/Pause art · centre bars + song text', 'art');
+  });
+
+  await step('visualizer: pausing stops capture and frames, and shows the paused key', async () => {
+    const pid = last(parecRuns()).pid;
+    sidra.setStatus('Paused');
+    await waitFor(() => !alive(pid), 'parec stopped', 3000);
+    await sleep(300);
+    const n = k('art').images.length;
+    await sleep(800);
+    assert.equal(k('art').images.length, n, 'no frames while paused');
+    const paused = last(k('art').images);
+    assert.ok(jpegPixel(paused, 65, 72).reduce((a, b) => a + b) / 3 > 200, 'pause icon showing');
+  });
+
+  await step('visualizer: "Everything playing" records the default output instead', async () => {
+    const runs = parecRuns().length;
+    artSettings({ viz: true, vizSource: 'all' });
+    sidra.setStatus('Playing');
+    const run = await waitFor(() => parecRuns()[runs], 'parec restarted', 5000);
+    assert.deepEqual(run.args.slice(0, 2), ['-d', '@DEFAULT_MONITOR@']);
+    await waitFor(() => k('art').images.length > 3, 'frames');
+  });
+
+  await step('visualizer: turning it off stops capture; the key goes back to the plain cover', async () => {
+    const pid = last(parecRuns()).pid;
+    artSettings({});
+    await waitFor(() => !alive(pid), 'parec stopped', 3000);
+    await sleep(400);
+    const n = k('art').images.length;
+    await sleep(600);
+    assert.equal(k('art').images.length, n, 'no more frames');
   });
 
   await step('Add to Library without a DevTools port shows an alert with a setup hint', async () => {

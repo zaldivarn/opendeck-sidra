@@ -8,6 +8,8 @@ const { SidraPlayer, SidraNotRunning } = require('./mpris');
 const { ArtCache } = require('./art');
 const { LibraryClient, LibraryError } = require('./library');
 const launcher = require('./launcher');
+const { AudioMeter } = require('./audio');
+const raster = require('./raster');
 const icons = require('./icons');
 const text = require('./text');
 
@@ -24,18 +26,38 @@ const A = {
 };
 
 const DEFAULTS = {
-  [A.artPlayPause]: { indicator: 'auto', dimWhenPaused: true, launchWhenClosed: true, launchCommand: '', holdTime: 'normal', doubleTapAction: 'none', doubleTapTime: 'normal' },
+  [A.artPlayPause]: {
+    indicator: 'auto',
+    dimWhenPaused: true,
+    launchWhenClosed: true,
+    launchCommand: '',
+    holdTime: 'normal',
+    doubleTapAction: 'none',
+    doubleTapTime: 'normal',
+    textFields: 'none',
+    textScroll: true,
+    textLineChars: 12,
+    textSpeed: 'normal',
+    viz: false,
+    vizStyle: 'bottom',
+    vizColorMode: 'album',
+    vizColor: '#ffffff',
+    vizFps: 'medium',
+    vizSource: 'sidra',
+  },
   [A.nowPlaying]: { fields: 'title-artist', background: 'art', scroll: true, lineChars: 12, speed: 'normal', press: 'raise' },
 };
 
 const SPEED_MS = { slow: 700, normal: 450, fast: 280 };
 const HOLD_MS = { short: 350, normal: 500, long: 800 };
 const DOUBLE_TAP_MS = { fast: 250, normal: 350, relaxed: 500 };
+const VIZ_FPS = { low: 8, medium: 12, high: 20 };
 
 const od = new OpenDeck();
 const log = (m) => od.log(m);
 const player = new SidraPlayer({ log });
 const art = new ArtCache(log);
+const meter = new AudioMeter({ log });
 
 let globalSettings = { cdpPort: 9222 };
 const library = new LibraryClient({ getPort: () => Number(globalSettings.cdpPort) || 9222 });
@@ -76,7 +98,7 @@ async function renderArtPlayPause(ctx, inst) {
   if (!s.running) return od.setImage(ctx, svg(icons.placeholderKey({ caption: closedCaption() })));
   if (!md.title && !md.artUrl) return od.setImage(ctx, svg(icons.placeholderKey()));
   const st = settingsFor(inst);
-  const uri = await art.playPauseKey(md.artUrl, playing, st);
+  const uri = await art.playPauseKey(md.artUrl, playing, { ...st, shade: shadeFor(inst) });
   if (seq !== inst.seq) return; // a newer render started while the cover was loading
   inst.renderedArtFor = uri ? md.key : null;
   // No cover to show: same rule as the cover itself, a pause icon only while paused.
@@ -88,18 +110,32 @@ function closedCaption() {
   return player.ready ? 'Sidra closed' : '';
 }
 
+/** Song text settings: Song Display has its own, the album-art key's are prefixed "text". */
+function textConfig(inst) {
+  const st = settingsFor(inst);
+  if (inst.action === A.artPlayPause) {
+    return { fields: st.textFields, scroll: st.textScroll, lineChars: st.textLineChars, speed: st.textSpeed };
+  }
+  return { fields: st.fields, scroll: st.scroll, lineChars: st.lineChars, speed: st.speed };
+}
+
 function songLines(inst) {
   const s = player.state;
   const md = s.metadata;
-  const st = settingsFor(inst);
+  const st = textConfig(inst);
+  const onArt = inst.action === A.artPlayPause;
+  if (onArt && (st.fields === 'none' || !st.fields)) return [];
   if (!s.running) {
+    if (onArt) return []; // the closed/opening placeholder already says so
     if (launching) return ['Opening', 'Sidra…'];
     return player.ready ? ['Sidra', 'closed'] : [];
   }
-  if (!md.title) return ['Nothing', 'playing'];
+  if (!md.title) return onArt ? [] : ['Nothing', 'playing'];
   switch (st.fields) {
+    case 'artist':
+      return md.artist ? (st.scroll ? [md.artist] : text.wrap(md.artist, clampChars(st.lineChars), 2)) : [];
     case 'title':
-      return st.scroll ? [md.title] : text.wrap(md.title, clampChars(st.lineChars), 3);
+      return st.scroll ? [md.title] : text.wrap(md.title, clampChars(st.lineChars), onArt ? 2 : 3);
     case 'title-artist-album':
       return [md.title, md.artist, md.album].filter(Boolean);
     case 'artist-title':
@@ -115,15 +151,20 @@ function clampChars(n) {
 }
 
 function drawSongTitle(ctx, inst) {
-  const st = settingsFor(inst);
+  const st = textConfig(inst);
   const width = clampChars(st.lineChars);
   const lines = inst.lines || [];
+  // The album-art key leaves the key's own title alone unless song text is switched on.
+  if (inst.action === A.artPlayPause) {
+    if (!lines.length && !inst.titleSet) return;
+    inst.titleSet = lines.length > 0;
+  }
   const out = lines.map((l) => (st.scroll ? text.marquee(l, width, inst.tick || 0) : text.truncate(l, width)));
   od.setTitle(ctx, out.join('\n'));
 }
 
 function startOrStopTicker(ctx, inst) {
-  const st = settingsFor(inst);
+  const st = textConfig(inst);
   const width = clampChars(st.lineChars);
   const needs = st.scroll && (inst.lines || []).some((l) => text.overflows(l, width));
   const interval = SPEED_MS[st.speed] || SPEED_MS.normal;
@@ -159,6 +200,95 @@ async function renderNowPlaying(ctx, inst, { resetScroll = true, background = tr
   od.setImage(ctx, image || svg(icons.plainBackground()));
 }
 
+/** Song text on the album-art key (OpenDeck draws it as the key's title). */
+function renderArtText(ctx, inst, { resetScroll = true } = {}) {
+  const hadText = Boolean(inst.lines && inst.lines.length);
+  inst.lines = songLines(inst);
+  if (resetScroll) inst.tick = 0;
+  drawSongTitle(ctx, inst);
+  startOrStopTicker(ctx, inst);
+  return hadText !== inst.lines.length > 0; // whether the shade behind the text changes
+}
+
+/** Where to darken the cover so the song text stays readable, from OpenDeck's title settings. */
+function shadeFor(inst) {
+  if (inst.action !== A.artPlayPause || !inst.lines || !inst.lines.length) return null;
+  const tp = inst.titleParams || {};
+  if (tp.showTitle === false) return null;
+  return tp.titleAlignment === 'top' ? 'top' : tp.titleAlignment === 'middle' ? 'middle' : 'bottom';
+}
+
+// ---------------------------------------------------------------- visualizer (album-art key)
+
+let vizTimer = null;
+let vizFps = 0;
+
+function vizKeys() {
+  const out = [];
+  eachOf(A.artPlayPause, (ctx, inst) => {
+    if (settingsFor(inst).viz) out.push([ctx, inst]);
+  });
+  return out;
+}
+
+/** Start or stop audio capture and the frame loop to match the keys, settings and playback. */
+function updateViz() {
+  const keys = vizKeys();
+  const active = keys.length > 0 && player.state.running && player.state.status === 'Playing';
+  if (!active) {
+    if (vizTimer) {
+      clearInterval(vizTimer);
+      vizTimer = null;
+      vizFps = 0;
+    }
+    meter.stop();
+    for (const [ctx, inst] of keys) {
+      if (inst.vizShowing) {
+        inst.vizShowing = false;
+        renderArtPlayPause(ctx, inst);
+      }
+    }
+    return;
+  }
+  // One capture serves every key: Sidra alone unless all visualizer keys ask for everything.
+  meter.start(keys.every(([, i]) => settingsFor(i).vizSource === 'all') ? 'all' : 'sidra');
+  const fps = Math.max(...keys.map(([, i]) => VIZ_FPS[settingsFor(i).vizFps] || VIZ_FPS.medium));
+  if (!vizTimer || fps !== vizFps) {
+    clearInterval(vizTimer);
+    vizFps = fps;
+    vizTimer = setInterval(vizTick, Math.round(1000 / fps));
+  }
+}
+
+function vizTick() {
+  const keys = vizKeys();
+  if (!meter.live) {
+    // No audio arriving (stream not found yet, or capture unavailable): plain cover, no bars.
+    for (const [ctx, inst] of keys) {
+      if (inst.vizShowing) {
+        inst.vizShowing = false;
+        renderArtPlayPause(ctx, inst);
+      }
+    }
+    return;
+  }
+  const levels = meter.levels();
+  const md = player.state.metadata;
+  for (const [ctx, inst] of keys) {
+    const st = settingsFor(inst);
+    // Sidra swaps the CDN cover for its cached copy mid-song; keep drawing on the one we have.
+    let url = md.artUrl;
+    if (!art.coverNow(url) && inst.vizKey === md.key && inst.vizUrl) url = inst.vizUrl;
+    const color = st.vizColorMode === 'custom' ? raster.parseHex(st.vizColor) : art.accent(url) || [235, 235, 240];
+    const frame = art.vizFrame(url, levels, { style: st.vizStyle === 'center' ? 'center' : 'bottom', color, shade: shadeFor(inst) });
+    if (!frame) continue;
+    inst.vizUrl = url;
+    inst.vizKey = md.key;
+    inst.vizShowing = true;
+    od.setImage(ctx, frame);
+  }
+}
+
 function renderShuffle(ctx) {
   od.setState(ctx, player.state.running && player.state.shuffle ? 1 : 0);
 }
@@ -172,6 +302,7 @@ function renderLibrary(ctx) {
 function render(ctx, inst) {
   switch (inst.action) {
     case A.artPlayPause:
+      renderArtText(ctx, inst);
       return renderArtPlayPause(ctx, inst);
     case A.nowPlaying:
       return renderNowPlaying(ctx, inst);
@@ -336,6 +467,13 @@ async function statusFor(action, ctx) {
     const inst = instances.get(ctx);
     const how = launcher.resolve({ command: inst ? settingsFor(inst).launchCommand : '' });
     status.launch = how ? { ok: true, message: `Opens with ${how.description}` } : { ok: false, message: "Sidra's launcher wasn't found — set a command below." };
+    if (inst && settingsFor(inst).viz) {
+      const ms = meter.status;
+      const playing = s.running && s.status === 'Playing';
+      status.viz = !playing
+        ? { ok: true, message: 'Starts when Sidra is playing' }
+        : { ok: ms.state === 'capturing', warn: ms.state === 'waiting', message: ms.message };
+    }
   }
   if (action === A.library) {
     try {
@@ -363,6 +501,18 @@ od.on('willAppear', (msg) => {
   od.resetContext(msg.context);
   render(msg.context, inst);
   if (msg.action === A.library) scheduleLibraryCheck();
+  if (msg.action === A.artPlayPause) updateViz();
+});
+
+// OpenDeck sends the key's title settings on appear and whenever they're edited; the
+// album-art key uses them to darken the cover behind its song text.
+od.on('titleParametersDidChange', (msg) => {
+  const inst = instances.get(msg.context);
+  if (!inst || inst.action !== A.artPlayPause) return;
+  const tp = (msg.payload && msg.payload.titleParameters) || {};
+  const before = shadeFor(inst);
+  inst.titleParams = { titleAlignment: tp.titleAlignment, showTitle: tp.showTitle };
+  if (shadeFor(inst) !== before) renderArtPlayPause(msg.context, inst);
 });
 
 od.on('willDisappear', (msg) => {
@@ -371,6 +521,7 @@ od.on('willDisappear', (msg) => {
   if (inst) cancelGesture(inst); // e.g. profile switched mid-press: no keyUp will follow
   instances.delete(msg.context);
   od.resetContext(msg.context);
+  if (inst && inst.action === A.artPlayPause) updateViz();
 });
 
 od.on('didReceiveSettings', (msg) => {
@@ -378,6 +529,7 @@ od.on('didReceiveSettings', (msg) => {
   if (!inst) return;
   inst.settings = (msg.payload && msg.payload.settings) || {};
   render(msg.context, inst);
+  if (inst.action === A.artPlayPause) updateViz();
   if (visibleInspector && visibleInspector.context === msg.context) sendStatus(msg.context, msg.action);
 });
 
@@ -533,6 +685,7 @@ player.on('change', (state, changed) => {
       case A.artPlayPause:
         // Sidra swaps the https cover URL for a cached file:// copy shortly after a track
         // starts; skip that second render when the cover already made it onto the key.
+        if (changed.track || changed.running) renderArtText(ctx, inst);
         if (changed.track || changed.status || changed.running || (changed.art && inst.renderedArtFor !== state.metadata.key)) {
           renderArtPlayPause(ctx, inst);
         }
@@ -552,6 +705,13 @@ player.on('change', (state, changed) => {
     }
   }
   if (changed.track || changed.running) scheduleLibraryCheck();
+  if (changed.status || changed.running) updateViz();
+});
+
+meter.on('status', () => {
+  if (visibleInspector && instances.get(visibleInspector.context)?.action === A.artPlayPause) {
+    sendStatus(visibleInspector.context, visibleInspector.action);
+  }
 });
 
 od.on('connected', () => {
@@ -561,6 +721,7 @@ od.on('connected', () => {
 
 od.on('disconnected', () => {
   // OpenDeck has gone away (quit, or the plugin is being reloaded): exit cleanly.
+  meter.stop();
   process.exit(0);
 });
 

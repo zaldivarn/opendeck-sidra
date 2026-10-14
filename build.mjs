@@ -92,7 +92,7 @@ const manifest = {
   Software: { MinimumVersion: '6.4' },
   Nodejs: { Version: '20' },
   Actions: [
-    action('playpauseart', 'Play/Pause (Album Art)', 'Play or pause, showing the current album cover', 'list-art', [img('key-art', { Title: '' })], {
+    action('playpauseart', 'Play/Pause (Album Art)', 'Play or pause, showing the current album cover', 'list-art', [img('key-art', { Title: '', FontSize: 9, TitleAlignment: 'bottom' })], {
       SupportedInMultiActions: false,
     }),
     action('play', 'Play', 'Start playback in Sidra', 'list-play', [img('key-play')]),
